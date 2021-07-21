@@ -41,6 +41,7 @@
 #include "lldb/Symbol/UnwindPlan.h"
 #include "lldb/Symbol/VariableList.h"
 #include "lldb/Target/ABI.h"
+#include "lldb/Target/DynamicLoader.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/SectionLoadList.h"
@@ -70,7 +71,6 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FormatAdapters.h"
-
 
 using namespace lldb;
 using namespace lldb_private;
@@ -370,9 +370,10 @@ protected:
                                    "when debugging on the host.");
                 return;
               }
-              if (platform_sp->IsConnected() && !platform_sp->GetFileExists(remote_file)) {
+              if (platform_sp->IsConnected() &&
+                  !platform_sp->GetFileExists(remote_file)) {
                 result.AppendError("remote --> local transfer without local "
-                                 "path is not implemented yet");
+                                   "path is not implemented yet");
                 return;
               }
               // Since there's only a remote file, we need to set the executable
@@ -2097,7 +2098,8 @@ protected:
           }
           if (INTERRUPT_REQUESTED(GetDebugger(),
                                   "Interrupted in dump all symtabs with {0} "
-                                  "of {1} dumped.", num_dumped, num_modules))
+                                  "of {1} dumped.",
+                                  num_dumped, num_modules))
             break;
 
           num_dumped++;
@@ -2125,9 +2127,10 @@ protected:
                 result.GetOutputStream().EOL();
                 result.GetOutputStream().EOL();
               }
-              if (INTERRUPT_REQUESTED(GetDebugger(),
-                    "Interrupted in dump symtab list with {0} of {1} dumped.",
-                    num_dumped, num_matches))
+              if (INTERRUPT_REQUESTED(
+                      GetDebugger(),
+                      "Interrupted in dump symtab list with {0} of {1} dumped.",
+                      num_dumped, num_matches))
                 break;
 
               num_dumped++;
@@ -2188,9 +2191,10 @@ protected:
       result.GetOutputStream().Format("Dumping sections for {0} modules.\n",
                                       num_modules);
       for (size_t image_idx = 0; image_idx < num_modules; ++image_idx) {
-        if (INTERRUPT_REQUESTED(GetDebugger(),
-              "Interrupted in dump all sections with {0} of {1} dumped",
-              image_idx, num_modules))
+        if (INTERRUPT_REQUESTED(
+                GetDebugger(),
+                "Interrupted in dump all sections with {0} of {1} dumped",
+                image_idx, num_modules))
           break;
 
         num_dumped++;
@@ -2209,9 +2213,10 @@ protected:
             FindModulesByName(&target, arg_cstr, module_list, true);
         if (num_matches > 0) {
           for (size_t i = 0; i < num_matches; ++i) {
-            if (INTERRUPT_REQUESTED(GetDebugger(),
-                  "Interrupted in dump section list with {0} of {1} dumped.",
-                  i, num_matches))
+            if (INTERRUPT_REQUESTED(
+                    GetDebugger(),
+                    "Interrupted in dump section list with {0} of {1} dumped.",
+                    i, num_matches))
               break;
 
             Module *module = module_list.GetModulePointerAtIndex(i);
@@ -2365,9 +2370,10 @@ protected:
       }
 
       for (size_t i = 0; i < num_matches; ++i) {
-        if (INTERRUPT_REQUESTED(GetDebugger(),
-              "Interrupted in dump clang ast list with {0} of {1} dumped.",
-              i, num_matches))
+        if (INTERRUPT_REQUESTED(
+                GetDebugger(),
+                "Interrupted in dump clang ast list with {0} of {1} dumped.", i,
+                num_matches))
           break;
 
         Module *m = module_list.GetModulePointerAtIndex(i);
@@ -2417,9 +2423,10 @@ protected:
       result.GetOutputStream().Format(
           "Dumping debug symbols for {0} modules.\n", num_modules);
       for (ModuleSP module_sp : target_modules.ModulesNoLocking()) {
-        if (INTERRUPT_REQUESTED(GetDebugger(), "Interrupted in dumping all "
+        if (INTERRUPT_REQUESTED(GetDebugger(),
+                                "Interrupted in dumping all "
                                 "debug symbols with {0} of {1} modules dumped",
-                                 num_dumped, num_modules))
+                                num_dumped, num_modules))
           break;
 
         if (DumpModuleSymbolFile(result.GetOutputStream(), module_sp.get()))
@@ -2436,9 +2443,10 @@ protected:
             FindModulesByName(&target, arg_cstr, module_list, true);
         if (num_matches > 0) {
           for (size_t i = 0; i < num_matches; ++i) {
-            if (INTERRUPT_REQUESTED(GetDebugger(), "Interrupted dumping {0} "
-                                                   "of {1} requested modules",
-                                                   i, num_matches))
+            if (INTERRUPT_REQUESTED(GetDebugger(),
+                                    "Interrupted dumping {0} "
+                                    "of {1} requested modules",
+                                    i, num_matches))
               break;
             Module *module = module_list.GetModulePointerAtIndex(i);
             if (module) {
@@ -2507,8 +2515,8 @@ protected:
           for (ModuleSP module_sp : target_modules.ModulesNoLocking()) {
             if (INTERRUPT_REQUESTED(GetDebugger(),
                                     "Interrupted in dump all line tables with "
-                                    "{0} of {1} dumped", num_dumped,
-                                    num_modules))
+                                    "{0} of {1} dumped",
+                                    num_dumped, num_modules))
               break;
 
             if (DumpCompileUnitLineTable(
@@ -2935,6 +2943,156 @@ protected:
   }
 };
 
+class CommandObjectTargetModulesReplace : public CommandObjectParsed {
+public:
+  CommandObjectTargetModulesReplace(CommandInterpreter &interpreter)
+      : CommandObjectParsed(
+            interpreter, "target modules replace",
+            "Replace module's existing object file with a new object file.",
+            "target modules replace [<module>]", eCommandRequiresTarget),
+        m_file_to_replace(LLDB_OPT_SET_1, false, "shlib", 's',
+                          lldb::eModuleCompletion, eArgTypeShlibName,
+                          "File name of the shared library to replace.") {
+    m_option_group.Append(&m_uuid_option_group, LLDB_OPT_SET_ALL,
+                          LLDB_OPT_SET_1);
+    m_option_group.Append(&m_file_to_replace, LLDB_OPT_SET_ALL, LLDB_OPT_SET_1);
+    m_option_group.Finalize();
+    CommandArgumentData module_arg{eArgTypePath, eArgRepeatStar};
+    m_arguments.push_back({module_arg});
+  }
+
+  ~CommandObjectTargetModulesReplace() override = default;
+
+  Options *GetOptions() override { return &m_option_group; }
+
+  void
+  HandleArgumentCompletion(CompletionRequest &request,
+                           OptionElementVector &opt_element_vector) override {
+    CommandCompletions::InvokeCommonCompletionCallbacks(
+        GetCommandInterpreter(), lldb::eDiskFileCompletion, request, nullptr);
+  }
+
+protected:
+  OptionGroupOptions m_option_group;
+  OptionGroupUUID m_uuid_option_group;
+  OptionGroupFile m_file_to_replace;
+
+  void DoExecute(Args &args, CommandReturnObject &result) override {
+    if (args.GetArgumentCount() == 0) {
+      result.AppendError(
+          "one or more executable image paths must be specified");
+      return;
+    }
+
+    Target &target = GetTarget();
+    bool flush = false;
+    // TODO: investigate if we should only allow one module. Similar for
+    // CommandObjectTargetModulesAdd and CommandObjectTargetSymbolsAdd.
+    for (auto &entry : args.entries()) {
+      if (entry.ref().empty())
+        continue;
+
+      FileSpec file_spec(entry.ref());
+      if (FileSystem::Instance().Exists(file_spec)) {
+        ModuleSpec module_spec(file_spec);
+        if (m_uuid_option_group.GetOptionValue().OptionWasSet())
+          module_spec.GetUUID() =
+              m_uuid_option_group.GetOptionValue().GetCurrentValue();
+        if (!module_spec.GetArchitecture().IsValid())
+          module_spec.GetArchitecture() = target.GetArchitecture();
+        if (m_file_to_replace.GetOptionValue().OptionWasSet())
+          module_spec.GetFileSpec().SetFilename(
+              m_file_to_replace.GetOptionValue()
+                  .GetCurrentValue()
+                  .GetFilename());
+
+        ModuleList matching_modules = findMatchingModules(module_spec);
+        if (matching_modules.IsEmpty()) {
+          result.AppendErrorWithFormat("can't find matching modules for '%s'",
+                                       entry.ref().str().c_str());
+          return;
+        }
+
+        if (matching_modules.GetSize() > 1) {
+          result.AppendErrorWithFormat(
+              "multiple modules match symbol file '%s', "
+              "use the --uuid option to resolve the "
+              "ambiguity.\n",
+              entry.ref().str().c_str());
+          return;
+        }
+
+        assert(matching_modules.GetSize() == 1);
+        auto module_sp = matching_modules.GetModuleAtIndex(0);
+        module_sp->ReplaceObjectFile(target, file_spec, /*object_offset=*/0);
+
+        if (target.GetPreloadSymbols())
+          module_sp->PreloadSymbols();
+
+        flush = true;
+        result.SetStatus(eReturnStatusSuccessFinishResult);
+      } else {
+        std::string resolved_path = file_spec.GetPath();
+        if (resolved_path != entry.ref()) {
+          result.AppendErrorWithFormat(
+              "invalid module path '%s' with resolved path '%s'\n",
+              entry.ref().str().c_str(), resolved_path.c_str());
+          break;
+        }
+        result.AppendErrorWithFormat("invalid module path '%s'\n",
+                                     entry.c_str());
+        break;
+      }
+    }
+
+    if (flush) {
+      ProcessSP process = target.GetProcessSP();
+      if (process) {
+        process->Flush();
+        // DYLD rendezvous might not be resolved, try to load all modules again
+        // as we might have main executable replaced.
+        DynamicLoader *dyld = process->GetDynamicLoader();
+        if (dyld)
+          dyld->DidAttach();
+      }
+    }
+    return;
+  }
+
+  ModuleList findMatchingModules(const ModuleSpec &module_spec) {
+    Target &target = GetTarget();
+    ModuleList matching_modules;
+    lldb_private::ModuleSpecList module_specs;
+    if (ObjectFile::GetModuleSpecifications(module_spec.GetFileSpec(), 0, 0,
+                                            module_specs)) {
+      // Now extract the module spec that matches the target architecture
+      ModuleSpec target_arch_module_spec;
+      ModuleSpec arch_matched_module_spec;
+      target_arch_module_spec.GetArchitecture() = target.GetArchitecture();
+      if (module_specs.FindMatchingModuleSpec(target_arch_module_spec,
+                                              arch_matched_module_spec)) {
+        if (arch_matched_module_spec.GetUUID().IsValid()) {
+          // It has a UUID, look for this UUID in the target modules
+          ModuleSpec uuid_module_spec;
+          uuid_module_spec.GetUUID() = arch_matched_module_spec.GetUUID();
+          target.GetImages().FindModules(uuid_module_spec, matching_modules);
+        }
+      }
+    }
+
+    // Just try to match up the file by basename if we have no matches at
+    // this point.
+    if (matching_modules.IsEmpty()) {
+      ModuleSpec filename_only_spec;
+      filename_only_spec.GetFileSpec().SetFilename(
+          module_spec.GetFileSpec().GetFilename());
+      target.GetImages().FindModules(filename_only_spec, matching_modules);
+    }
+
+    return matching_modules;
+  }
+};
+
 class CommandObjectTargetModulesLoad
     : public CommandObjectTargetModulesModuleAutoComplete {
 public:
@@ -3295,81 +3453,79 @@ protected:
       return;
     }
 
-      size_t num_modules = 0;
+    size_t num_modules = 0;
 
-      // This locker will be locked on the mutex in module_list_ptr if it is
-      // non-nullptr. Otherwise it will lock the
-      // AllocationModuleCollectionMutex when accessing the global module list
-      // directly.
-      std::unique_lock<std::recursive_mutex> guard(
-          Module::GetAllocationModuleCollectionMutex(), std::defer_lock);
+    // This locker will be locked on the mutex in module_list_ptr if it is
+    // non-nullptr. Otherwise it will lock the
+    // AllocationModuleCollectionMutex when accessing the global module list
+    // directly.
+    std::unique_lock<std::recursive_mutex> guard(
+        Module::GetAllocationModuleCollectionMutex(), std::defer_lock);
 
-      const ModuleList *module_list_ptr = nullptr;
-      const size_t argc = command.GetArgumentCount();
-      if (argc == 0) {
-        if (use_global_module_list) {
-          guard.lock();
-          num_modules = Module::GetNumberAllocatedModules();
-        } else {
-          module_list_ptr = &target.GetImages();
-        }
+    const ModuleList *module_list_ptr = nullptr;
+    const size_t argc = command.GetArgumentCount();
+    if (argc == 0) {
+      if (use_global_module_list) {
+        guard.lock();
+        num_modules = Module::GetNumberAllocatedModules();
       } else {
-        for (const Args::ArgEntry &arg : command) {
-          // Dump specified images (by basename or fullpath)
-          const size_t num_matches = FindModulesByName(
-              &target, arg.c_str(), module_list, use_global_module_list);
-          if (num_matches == 0) {
-            if (argc == 1) {
-              result.AppendErrorWithFormat("no modules found that match '%s'",
-                                           arg.c_str());
-              return;
-            }
+        module_list_ptr = &target.GetImages();
+      }
+    } else {
+      for (const Args::ArgEntry &arg : command) {
+        // Dump specified images (by basename or fullpath)
+        const size_t num_matches = FindModulesByName(
+            &target, arg.c_str(), module_list, use_global_module_list);
+        if (num_matches == 0) {
+          if (argc == 1) {
+            result.AppendErrorWithFormat("no modules found that match '%s'",
+                                         arg.c_str());
+            return;
           }
         }
-
-        module_list_ptr = &module_list;
       }
 
-      std::unique_lock<std::recursive_mutex> lock;
-      if (module_list_ptr != nullptr) {
-        lock =
-            std::unique_lock<std::recursive_mutex>(module_list_ptr->GetMutex());
+      module_list_ptr = &module_list;
+    }
 
-        num_modules = module_list_ptr->GetSize();
-      }
+    std::unique_lock<std::recursive_mutex> lock;
+    if (module_list_ptr != nullptr) {
+      lock =
+          std::unique_lock<std::recursive_mutex>(module_list_ptr->GetMutex());
 
-      if (num_modules > 0) {
-        for (uint32_t image_idx = 0; image_idx < num_modules; ++image_idx) {
-          ModuleSP module_sp;
-          Module *module;
-          if (module_list_ptr) {
-            module_sp = module_list_ptr->GetModuleAtIndexUnlocked(image_idx);
-            module = module_sp.get();
-          } else {
-            module = Module::GetAllocatedModuleAtIndex(image_idx);
-            module_sp = module->shared_from_this();
-          }
+      num_modules = module_list_ptr->GetSize();
+    }
 
-          const size_t indent = strm.Printf("[%3u] ", image_idx);
-          PrintModule(target, module, indent, strm);
-        }
-        result.SetStatus(eReturnStatusSuccessFinishResult);
-      } else {
-        if (argc) {
-          if (use_global_module_list)
-            result.AppendError(
-                "the global module list has no matching modules");
-          else
-            result.AppendError("the target has no matching modules");
+    if (num_modules > 0) {
+      for (uint32_t image_idx = 0; image_idx < num_modules; ++image_idx) {
+        ModuleSP module_sp;
+        Module *module;
+        if (module_list_ptr) {
+          module_sp = module_list_ptr->GetModuleAtIndexUnlocked(image_idx);
+          module = module_sp.get();
         } else {
-          if (use_global_module_list)
-            result.AppendError("the global module list is empty");
-          else
-            result.AppendError(
-                "the target has no associated executable images");
+          module = Module::GetAllocatedModuleAtIndex(image_idx);
+          module_sp = module->shared_from_this();
         }
-        return;
+
+        const size_t indent = strm.Printf("[%3u] ", image_idx);
+        PrintModule(target, module, indent, strm);
       }
+      result.SetStatus(eReturnStatusSuccessFinishResult);
+    } else {
+      if (argc) {
+        if (use_global_module_list)
+          result.AppendError("the global module list has no matching modules");
+        else
+          result.AppendError("the target has no matching modules");
+      } else {
+        if (use_global_module_list)
+          result.AppendError("the global module list is empty");
+        else
+          result.AppendError("the target has no associated executable images");
+      }
+      return;
+    }
   }
 
   void PrintModule(Target &target, Module *module, int indent, Stream &strm) {
@@ -3479,7 +3635,8 @@ protected:
           ref_count = module_sp.use_count() - 1;
         }
         if (width)
-          strm.Printf("{%c %*" PRIu64 "}", in_shared_cache, width, (uint64_t)ref_count);
+          strm.Printf("{%c %*" PRIu64 "}", in_shared_cache, width,
+                      (uint64_t)ref_count);
         else
           strm.Printf("{%c %" PRIu64 "}", in_shared_cache, (uint64_t)ref_count);
       } break;
@@ -3617,7 +3774,7 @@ public:
 
     int m_type = eLookupTypeInvalid; // Should be a eLookupTypeXXX enum after
                                      // parsing options
-    std::string m_str; // Holds name lookup
+    std::string m_str;               // Holds name lookup
     lldb::addr_t m_addr = LLDB_INVALID_ADDRESS; // Holds the address to lookup
     bool m_cached = true;
   };
@@ -4290,6 +4447,9 @@ public:
                                "target modules <sub-command> ...") {
     LoadSubCommand(
         "add", CommandObjectSP(new CommandObjectTargetModulesAdd(interpreter)));
+    LoadSubCommand(
+        "replace",
+        CommandObjectSP(new CommandObjectTargetModulesReplace(interpreter)));
     LoadSubCommand("load", CommandObjectSP(new CommandObjectTargetModulesLoad(
                                interpreter)));
     LoadSubCommand("dump", CommandObjectSP(new CommandObjectTargetModulesDump(
@@ -4381,8 +4541,8 @@ protected:
 
     // First extract all module specs from the symbol file
     lldb_private::ModuleSpecList symfile_module_specs;
-    if (ObjectFile::GetModuleSpecifications(module_spec.GetSymbolFileSpec(),
-                                            0, 0, symfile_module_specs)) {
+    if (ObjectFile::GetModuleSpecifications(module_spec.GetSymbolFileSpec(), 0,
+                                            0, symfile_module_specs)) {
       // Now extract the module spec that matches the target architecture
       ModuleSpec target_arch_module_spec;
       ModuleSpec symfile_module_spec;
@@ -4404,8 +4564,8 @@ protected:
         const size_t num_symfile_module_specs = symfile_module_specs.GetSize();
         for (size_t i = 0;
              i < num_symfile_module_specs && matching_modules.IsEmpty(); ++i) {
-          if (symfile_module_specs.GetModuleSpecAtIndex(
-                  i, symfile_module_spec)) {
+          if (symfile_module_specs.GetModuleSpecAtIndex(i,
+                                                        symfile_module_spec)) {
             if (symfile_module_spec.GetUUID().IsValid()) {
               // It has a UUID.  Look for this UUID in the target modules.
               ModuleSpec symfile_uuid_module_spec;
@@ -5073,10 +5233,10 @@ protected:
     m_stop_hook_sp.reset();
 
     Target &target = GetTarget();
-    Target::StopHookSP new_hook_sp =
-        target.CreateStopHook(m_python_class_options.GetName().empty() ?
-                               Target::StopHook::StopHookKind::CommandBased
-                               : Target::StopHook::StopHookKind::ScriptBased);
+    Target::StopHookSP new_hook_sp = target.CreateStopHook(
+        m_python_class_options.GetName().empty()
+            ? Target::StopHook::StopHookKind::CommandBased
+            : Target::StopHook::StopHookKind::ScriptBased);
 
     //  First step, make the specifier.
     std::unique_ptr<SymbolContextSpecifier> specifier_up;
