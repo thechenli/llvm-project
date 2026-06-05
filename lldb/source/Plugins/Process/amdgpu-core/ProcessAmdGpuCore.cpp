@@ -191,8 +191,10 @@ std::shared_ptr<ProcessElfEmbeddedCore> ProcessAmdGpuCore::CreateInstance(
   return gpu_process_sp;
 }
 
-// Destructor
-ProcessAmdGpuCore::~ProcessAmdGpuCore() {
+// Detach from amd-dbgapi and finalize the library. Guarded by m_gpu_pid so it
+// is idempotent: whichever of DoDestroy()/~ProcessAmdGpuCore() runs first does
+// the work, the other becomes a no-op.
+void ProcessAmdGpuCore::DetachFromGpuDbgApi() {
   if (m_gpu_pid.handle != AMD_DBGAPI_PROCESS_NONE.handle) {
     amd_dbgapi_status_t status = amd_dbgapi_process_detach(m_gpu_pid);
     if (status != AMD_DBGAPI_STATUS_SUCCESS) {
@@ -203,6 +205,20 @@ ProcessAmdGpuCore::~ProcessAmdGpuCore() {
     status = amd_dbgapi_finalize();
     assert(status == AMD_DBGAPI_STATUS_SUCCESS);
   }
+}
+
+// Destructor
+ProcessAmdGpuCore::~ProcessAmdGpuCore() { DetachFromGpuDbgApi(); }
+
+Status ProcessAmdGpuCore::DoDestroy() {
+  // Detach from amd-dbgapi here (not only in the destructor) so the attach is
+  // released synchronously on Process::Destroy(), not only when the process
+  // object is finally freed. lldb's command execution context can pin the old
+  // GPU process past the end of a command, so without this a recreate + fresh
+  // LoadCore() within one command sees the stale attach and fails with
+  // "Failed to initialize AMD ROCm debug API".
+  DetachFromGpuDbgApi();
+  return Status();
 }
 
 static amd_dbgapi_status_t amd_dbgapi_client_process_get_info_callback(

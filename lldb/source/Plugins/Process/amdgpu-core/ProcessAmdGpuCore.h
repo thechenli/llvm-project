@@ -53,6 +53,13 @@ public:
   // Creating a new process, or attaching to an existing one
   lldb_private::Status DoLoadCore() override;
 
+  // Detach from amd-dbgapi on destroy (not only in the destructor) so that
+  // Process::Destroy() releases the amd_dbgapi attach synchronously. This lets
+  // a fresh LoadCore() of the same merged core (e.g. when auto-load-debuginfo
+  // recreates the target) re-attach without "Failed to initialize AMD ROCm
+  // debug API".
+  lldb_private::Status DoDestroy() override;
+
   lldb_private::DynamicLoader *GetDynamicLoader() override;
 
   llvm::Error LoadModules() override;
@@ -77,6 +84,11 @@ private:
   const lldb_private::ArchSpec &GetArchitecture();
 
   void AddThread(amd_dbgapi_wave_id_t wave_id);
+
+  // Detach from amd-dbgapi and finalize the library, guarded by m_gpu_pid so it
+  // is idempotent. Shared by DoDestroy() (synchronous detach on
+  // Process::Destroy()) and the destructor (eventual teardown).
+  void DetachFromGpuDbgApi();
 
   amd_dbgapi_architecture_id_t m_architecture_id = AMD_DBGAPI_ARCHITECTURE_NONE;
   amd_dbgapi_process_id_t m_gpu_pid = AMD_DBGAPI_PROCESS_NONE;
