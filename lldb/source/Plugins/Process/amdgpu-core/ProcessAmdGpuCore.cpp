@@ -20,6 +20,9 @@
 #include "lldb/Utility/DataExtractor.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
+#include "lldb/Interpreter/CommandInterpreter.h"
+#include "lldb/Interpreter/CommandObject.h"
+#include "lldb/Interpreter/CommandReturnObject.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/Threading.h"
 
@@ -113,6 +116,49 @@ void ProcessAmdGpuCore::Terminate() {
       ProcessAmdGpuCore::CreateInstance);
 }
 
+namespace {
+// Command to re-resolve GPU code-object modules in place against the current
+// search paths (no target/process recreate). auto-load-debuginfo invokes this
+// after it downloads symbols and configures the search paths for a pre-loaded
+// core, so GPU code objects bound as unresolved placeholders at first load can
+// rebind to real module files.
+class CommandObjectAmdGpuReloadModules : public CommandObjectParsed {
+public:
+  CommandObjectAmdGpuReloadModules(CommandInterpreter &interpreter)
+      : CommandObjectParsed(
+            interpreter, "amdgpu-reload-modules",
+            "Re-resolve GPU code-object modules against current search paths.",
+            "amdgpu-reload-modules") {}
+  ~CommandObjectAmdGpuReloadModules() override = default;
+
+protected:
+  void DoExecute(Args &args, CommandReturnObject &result) override {
+    Target *target = m_exe_ctx.GetTargetPtr();
+    Process *process = target ? target->GetProcessSP().get() : nullptr;
+    if (!process ||
+        process->GetPluginName() != ProcessAmdGpuCore::GetPluginNameStatic()) {
+      result.AppendError("No amdgpu-core process is selected.");
+      return;
+    }
+    auto *gpu = static_cast<ProcessAmdGpuCore *>(process);
+    if (llvm::Error e = gpu->LoadModules()) {
+      result.AppendError(llvm::toString(std::move(e)));
+      return;
+    }
+    // Invalidate cached stack frames so bt re-symbolicates against the
+    // newly-resolved modules (lighter than Process::Flush(), which also drops
+    // the thread list and disturbs the amd-dbgapi attach).
+    ThreadList &threads = process->GetThreadList();
+    for (uint32_t i = 0, n = threads.GetSize(); i < n; ++i) {
+      if (lldb::ThreadSP t = threads.GetThreadAtIndex(i))
+        t->ClearStackFrames();
+    }
+    result.AppendMessage("Re-resolved GPU code-object modules.");
+    result.SetStatus(lldb::eReturnStatusSuccessFinishResult);
+  }
+};
+} // namespace
+
 void ProcessAmdGpuCore::DebuggerInitialize(Debugger &debugger) {
   if (!PluginManager::GetSettingForProcessPlugin(
           debugger, PluginProperties::GetSettingName())) {
@@ -121,6 +167,12 @@ void ProcessAmdGpuCore::DebuggerInitialize(Debugger &debugger) {
         "Properties for the amdgpu-core process plug-in.",
         /*is_global_setting=*/true);
   }
+  // Register the in-place GPU module reload command.
+  debugger.GetCommandInterpreter().AddUserCommand(
+      "amdgpu-reload-modules",
+      lldb::CommandObjectSP(new CommandObjectAmdGpuReloadModules(
+          debugger.GetCommandInterpreter())),
+      /*can_replace=*/true);
 }
 
 static std::optional<CoreNote>
@@ -505,6 +557,28 @@ llvm::Error ProcessAmdGpuCore::LoadModules() {
 
   Target &target = GetTarget();
   ModuleList loaded_modules;
+
+  // Drop any existing placeholder modules so the loop below re-resolves them
+  // against the current search paths. On the initial load there are none (no-op);
+  // on a reload (after auto-load-debuginfo has configured the search paths) this
+  // lets GPU code objects that were unresolved at first load bind to real module
+  // files in place, without recreating the target/process.
+  {
+    ModuleList &images = target.GetImages();
+    ModuleList placeholders;
+    for (size_t i = 0; i < images.GetSize(); ++i) {
+      ModuleSP m = images.GetModuleAtIndex(i);
+      if (m && m->GetObjectFile() &&
+          m->GetObjectFile()->GetPluginName() == "placeholder")
+        placeholders.Append(m);
+    }
+    if (placeholders.GetSize() > 0) {
+      LLDB_LOGF(log, "Re-resolve: removing %u placeholder module(s)",
+                (unsigned)placeholders.GetSize());
+      target.ModulesDidUnload(placeholders, /*delete_locations=*/true);
+      images.Remove(placeholders);
+    }
+  }
 
   for (size_t i = 0; i < count; ++i) {
     uint64_t l_addr;
