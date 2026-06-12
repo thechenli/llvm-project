@@ -3013,21 +3013,46 @@ protected:
           return;
         }
 
+        // A single host file can back multiple modules when it embeds several
+        // objects at different offsets (e.g. AMD GPU code objects inside a host
+        // shared library), each loaded as its own placeholder. Matching by
+        // basename then finds all of them, so only reject the ambiguity when the
+        // matches are NOT all placeholders -- a genuine collision the user must
+        // disambiguate with --uuid.
         if (matching_modules.GetSize() > 1) {
-          result.AppendErrorWithFormat(
-              "multiple modules match symbol file '%s', "
-              "use the --uuid option to resolve the "
-              "ambiguity.\n",
-              entry.ref().str().c_str());
-          return;
+          bool all_placeholders = true;
+          for (size_t i = 0; i < matching_modules.GetSize(); ++i) {
+            ObjectFile *of =
+                matching_modules.GetModuleAtIndex(i)->GetObjectFile();
+            if (!of || of->GetPluginName() != "placeholder") {
+              all_placeholders = false;
+              break;
+            }
+          }
+          if (!all_placeholders) {
+            result.AppendErrorWithFormat(
+                "multiple modules match symbol file '%s', "
+                "use the --uuid option to resolve the ambiguity.\n",
+                entry.ref().str().c_str());
+            return;
+          }
         }
 
-        assert(matching_modules.GetSize() == 1);
-        auto module_sp = matching_modules.GetModuleAtIndex(0);
-        module_sp->ReplaceObjectFile(target, file_spec, /*object_offset=*/0);
-
-        if (target.GetPreloadSymbols())
-          module_sp->PreloadSymbols();
+        // Replace each match with the real file. A placeholder records the
+        // object's offset within the host file at load time (0 for a CPU whole-
+        // file placeholder, the slice offset for a GPU code object), and
+        // ReplaceObjectFile re-applies the load address it captured from the
+        // placeholder, so every module rebinds in place.
+        for (size_t i = 0; i < matching_modules.GetSize(); ++i) {
+          ModuleSP module_sp = matching_modules.GetModuleAtIndex(i);
+          uint64_t object_offset = 0;
+          ObjectFile *of = module_sp->GetObjectFile();
+          if (of && of->GetPluginName() == "placeholder")
+            object_offset = of->GetFileOffset();
+          module_sp->ReplaceObjectFile(target, file_spec, object_offset);
+          if (target.GetPreloadSymbols())
+            module_sp->PreloadSymbols();
+        }
 
         flush = true;
         result.SetStatus(eReturnStatusSuccessFinishResult);

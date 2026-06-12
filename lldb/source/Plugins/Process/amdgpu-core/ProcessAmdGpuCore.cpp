@@ -265,14 +265,18 @@ static amd_dbgapi_status_t amd_dbgapi_xfer_global_memory_callback(
   if (!process)
     return AMD_DBGAPI_STATUS_ERROR_NOT_AVAILABLE;
 
-  // Write operations are not supported for core files (which are read-only)
-  // Return ERROR_NOT_SUPPORTED to explicitly indicate this is not allowed
+  // dbgapi issues writes during attach and module load (e.g. toggling the
+  // runtime loader's debug flag, parking waves). A core file is immutable, so
+  // these writes have nowhere to land -- but returning an error makes dbgapi
+  // abort with a fatal xfer_global_memory_partial failure. The transient state
+  // these writes carry is irrelevant to read-only wave inspection, so accept
+  // and discard them and report success, letting dbgapi continue enumerating.
   if (write_buffer != nullptr) {
     LLDB_LOGF(GetLog(LLDBLog::Process),
-              "xfer_global_memory callback: write operation not supported for "
-              "read-only core file (address=0x%" PRIx64 ", size=%zu)",
+              "xfer_global_memory callback: discarding write to read-only core "
+              "(address=0x%" PRIx64 ", size=%zu)",
               global_address, *value_size);
-    return AMD_DBGAPI_STATUS_ERROR_NOT_SUPPORTED;
+    return AMD_DBGAPI_STATUS_SUCCESS;
   }
 
   Status error;
@@ -334,13 +338,35 @@ bool ProcessAmdGpuCore::initRocm() {
     return false;
   }
 
-  amd_dbgapi_architecture_id_t architecture_id;
-  // TODO: do not hardcode the device id
-  status = amd_dbgapi_get_architecture(0x04C, &architecture_id);
-  if (status != AMD_DBGAPI_STATUS_SUCCESS) {
-    // Handle error
-    LLDB_LOGF(GetLog(LLDBLog::Process), "amd_dbgapi_get_architecture failed");
-    return false;
+  // Determine the GPU architecture from the core's agents instead of
+  // hardcoding it. Different AMD parts (gfx942/MI300X, gfx950/MI350X, ...) have
+  // different register layouts; using a mismatched architecture makes every
+  // per-wave register query fail with INVALID_ARGUMENT_COMPATIBILITY, which
+  // surfaces as PC=0xffffffffffffffff with an empty register set.
+  amd_dbgapi_architecture_id_t architecture_id = AMD_DBGAPI_ARCHITECTURE_NONE;
+  {
+    size_t agent_count = 0;
+    amd_dbgapi_agent_id_t *agent_list = nullptr;
+    amd_dbgapi_status_t agent_status = amd_dbgapi_process_agent_list(
+        m_gpu_pid, &agent_count, &agent_list, nullptr);
+    if (agent_status == AMD_DBGAPI_STATUS_SUCCESS && agent_list) {
+      auto agent_list_cleanup =
+          llvm::make_scope_exit([agent_list]() { free(agent_list); });
+      if (agent_count > 0)
+        amd_dbgapi_agent_get_info(agent_list[0],
+                                  AMD_DBGAPI_AGENT_INFO_ARCHITECTURE,
+                                  sizeof(architecture_id), &architecture_id);
+    }
+  }
+  if (architecture_id.handle == 0) {
+    // Fall back to gfx942 (MI300X) if the agent architecture is unavailable.
+    LLDB_LOGF(GetLog(LLDBLog::Process),
+              "Agent architecture unavailable; falling back to gfx942");
+    status = amd_dbgapi_get_architecture(0x04C, &architecture_id);
+    if (status != AMD_DBGAPI_STATUS_SUCCESS) {
+      LLDB_LOGF(GetLog(LLDBLog::Process), "amd_dbgapi_get_architecture failed");
+      return false;
+    }
   }
   m_architecture_id = architecture_id;
 
@@ -659,8 +685,16 @@ bool ProcessAmdGpuCore::DoUpdateThreadList(ThreadList &old_thread_list,
     return ret;
 
   for (size_t i = 0; i < count; ++i) {
+    // Use each wave's own architecture so the register context's register ids
+    // match the wave. A mismatched architecture makes
+    // amd_dbgapi_wave_register_exists fail with INVALID_ARGUMENT_COMPATIBILITY,
+    // producing PC=0xffffffffffffffff and no readable registers. Fall back to
+    // the process architecture if the per-wave query fails.
+    amd_dbgapi_architecture_id_t wave_arch = m_architecture_id;
+    amd_dbgapi_wave_get_info(wave_list[i], AMD_DBGAPI_WAVE_INFO_ARCHITECTURE,
+                             sizeof(wave_arch), &wave_arch);
     auto thread = std::make_unique<ThreadAMDGPU>(
-        *this, m_architecture_id, wave_list[i].handle, wave_list[i]);
+        *this, wave_arch, wave_list[i].handle, wave_list[i]);
     new_thread_list.AddThread(std::move(thread));
   }
 

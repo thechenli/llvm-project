@@ -26,8 +26,13 @@ ObjectFilePlaceholder::ObjectFilePlaceholder(
     const lldb::ModuleSP &module_sp,
     const lldb_private::ModuleSpec &module_spec, lldb::addr_t base,
     lldb::addr_t size)
-    : ObjectFile(module_sp, &module_spec.GetFileSpec(), /*file_offset*/ 0,
-                 /*length*/ 0, /*data_sp*/ nullptr, /*data_offset*/ 0),
+    // Carry the object's offset/size within the host file (set by the loader on
+    // the ModuleSpec). For GPU code objects several placeholders share one host
+    // file at different offsets; recording the offset lets "target modules
+    // replace" hydrate each placeholder from the correct slice.
+    : ObjectFile(module_sp, &module_spec.GetFileSpec(),
+                 module_spec.GetObjectOffset(), module_spec.GetObjectSize(),
+                 /*data_sp*/ nullptr, /*data_offset*/ 0),
       m_arch(module_spec.GetArchitecture()), m_uuid(module_spec.GetUUID()),
       m_base(base), m_size(size) {
   m_symtab_up = std::make_unique<lldb_private::Symtab>(this);
