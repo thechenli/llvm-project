@@ -20,6 +20,7 @@
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/StreamString.h"
 #include "lldb/Utility/Timer.h"
+#include "llvm/ADT/StringRef.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -85,6 +86,14 @@ SymbolVendorELF::CreateInstance(const lldb::ModuleSP &module_sp,
   // If the main object file already contains debug info, then we are done.
   if (obj_file->GetSectionList()->FindSectionByType(
           lldb::eSectionTypeDWARFDebugInfo, true))
+    return nullptr;
+
+  // AMDGPU core memory:// code objects use synthetic module paths like
+  // "amd_memory_kernel[...)" for uniqueness. They are not filesystem names, so
+  // external symbol lookup would only probe every debug-file search path for a
+  // file that cannot exist.
+  if (module_sp->GetFileSpec().GetFilename().GetStringRef().starts_with(
+          "amd_memory_kernel["))
     return nullptr;
 
   // If the module specified a filespec, use that.

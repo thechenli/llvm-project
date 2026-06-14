@@ -574,9 +574,12 @@ llvm::Error ProcessAmdGpuCore::LoadModules() {
     if (lib_info->file_size.has_value())
       module_spec.SetObjectSize(lib_info->file_size.value());
 
-    // Get or create the module from the module spec
+    // Get or create the module from the module spec. Defer notification: a GPU
+    // core can carry thousands of code objects, and notifying per module makes
+    // each add re-scan the whole module list (language-runtime probing), which
+    // is O(n^2). The single ModulesDidLoad below notifies once instead.
     ModuleSP module_sp = target.GetOrCreateModule(module_spec,
-                                                  /*notify=*/true);
+                                                  /*notify=*/false);
     if (!module_sp) {
       // The module file could not be found on disk. Create a placeholder
       // module so it still shows up in "image list" and can be re-hydrated
@@ -596,7 +599,7 @@ llvm::Error ProcessAmdGpuCore::LoadModules() {
         module_sp = Module::CreateModuleFromObjectFile<ObjectFilePlaceholder>(
             module_spec, load_addr, load_size);
         if (module_sp) {
-          target.GetImages().Append(module_sp, /*notify=*/true);
+          target.GetImages().Append(module_sp, /*notify=*/false);
         }
       } else {
         LLDB_LOG(log, "Unable to locate module file and no size info "
@@ -659,8 +662,20 @@ bool ProcessAmdGpuCore::DoUpdateThreadList(ThreadList &old_thread_list,
     return ret;
 
   for (size_t i = 0; i < count; ++i) {
+    // Use the wave's own architecture, not the process-wide one: a process can
+    // run code objects of different architectures, and amd-dbgapi keys register
+    // ids by architecture. Reading a register with a register id from a
+    // mismatched architecture fails with INVALID_ARGUMENT_COMPATIBILITY,
+    // leaving the wave with an invalid PC.
+    amd_dbgapi_architecture_id_t wave_arch = m_architecture_id;
+    amd_dbgapi_architecture_id_t queried_arch{0};
+    if (amd_dbgapi_wave_get_info(
+            wave_list[i], AMD_DBGAPI_WAVE_INFO_ARCHITECTURE,
+            sizeof(queried_arch), &queried_arch) == AMD_DBGAPI_STATUS_SUCCESS)
+      wave_arch = queried_arch;
+
     auto thread = std::make_unique<ThreadAMDGPU>(
-        *this, m_architecture_id, wave_list[i].handle, wave_list[i]);
+        *this, wave_arch, wave_list[i].handle, wave_list[i]);
     new_thread_list.AddThread(std::move(thread));
   }
 

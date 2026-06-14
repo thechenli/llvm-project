@@ -1142,6 +1142,14 @@ ModuleList::GetSharedModule(const ModuleSpec &module_spec, ModuleSP &module_sp,
     module_sp.reset();
   }
 
+  // AMDGPU core memory:// code objects use synthetic module paths like
+  // "amd_memory_kernel[...)" for uniqueness. They are not filesystem names, so
+  // falling back to target executable search paths can produce a large number
+  // of doomed path probes.
+  if (module_spec.GetFileSpec().GetFilename().GetStringRef().starts_with(
+          "amd_memory_kernel["))
+    return error;
+
   // Get module search paths from the target if available.
   lldb::TargetSP target_sp = module_spec.GetTargetSP();
   FileSpecList module_search_paths;
