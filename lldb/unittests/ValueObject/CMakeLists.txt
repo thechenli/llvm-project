@@ -2,6 +2,7 @@ add_lldb_unittest(LLDBValueObjectTests
   DumpValueObjectOptionsTests.cpp
   DILLexerTests.cpp
   DynamicValueObjectLocalBuffer.cpp
+  ValueObjectChildTest.cpp
 
   LINK_COMPONENTS
     Support

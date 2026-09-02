@@ -40,6 +40,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
 #include <map>
 
 using namespace llvm;
@@ -552,6 +553,24 @@ bool IRInterpreter::CanInterpret(llvm::Module &module, llvm::Function &function,
       case Instruction::Br:
       case Instruction::PHI:
         break;
+      case Instruction::AddrSpaceCast: {
+        // Allocations made by the interpreter already use LLDB's flat virtual
+        // address space. The cast only changes the IR type of that address.
+        // Other address-space conversions require target-specific lowering.
+        auto *cast_inst = cast<AddrSpaceCastInst>(&ii);
+        auto *alloca = dyn_cast<AllocaInst>(cast_inst->getOperand(0));
+        const DataLayout &data_layout = module.getDataLayout();
+        if (!alloca ||
+            alloca->getAddressSpace() != data_layout.getAllocaAddrSpace() ||
+            cast_inst->getDestAddressSpace() != 0) {
+          LLDB_LOGF(log, "Unsupported instruction: %s",
+                    PrintValue(&ii).c_str());
+          error =
+              lldb_private::Status::FromErrorString(unsupported_opcode_error);
+          return false;
+        }
+        break;
+      }
       case Instruction::Call: {
         CallInst *call_inst = dyn_cast<CallInst>(&ii);
 
@@ -909,7 +928,14 @@ bool IRInterpreter::Interpret(llvm::Module &module, llvm::Function &function,
         return false;
       }
 
-      lldb::addr_t P = frame.Malloc(Tptr);
+      // The backing allocation stores IRMemoryMap's default-address-space
+      // pointer encoding. Reserve enough room for it even when the IR pointer
+      // type is narrower (for example, AMDGPU's 32-bit private address space).
+      size_t pointer_size = std::max<size_t>(data_layout.getTypeAllocSize(Tptr),
+                                             frame.m_addr_byte_size);
+      uint8_t pointer_alignment = std::max<uint64_t>(
+          data_layout.getPrefTypeAlign(Tptr).value(), frame.m_addr_byte_size);
+      lldb::addr_t P = frame.Malloc(pointer_size, pointer_alignment);
 
       if (P == LLDB_INVALID_ADDRESS) {
         LLDB_LOGF(log,
@@ -954,6 +980,31 @@ bool IRInterpreter::Interpret(llvm::Module &module, llvm::Function &function,
       }
 
       frame.AssignValue(inst, S, module);
+    } break;
+    case Instruction::AddrSpaceCast: {
+      const AddrSpaceCastInst *cast_inst = cast<AddrSpaceCastInst>(inst);
+      const Value *source = cast_inst->getOperand(0);
+
+      // CanInterpret restricts this to interpreter-backed allocas. Those
+      // contain an lldb::addr_t, not a target address-space-specific pointer
+      // representation, so preserve the full virtual address here.
+      lldb::addr_t source_address = frame.ResolveValue(source, module);
+      lldb::addr_t pointer_value;
+      lldb_private::Status read_error;
+      execution_unit.ReadPointerFromMemory(&pointer_value, source_address,
+                                           read_error);
+      if (!read_error.Success()) {
+        LLDB_LOGF(log, "Couldn't read the source of an AddrSpaceCastInst");
+        error = lldb_private::Status::FromErrorString(memory_read_error);
+        return false;
+      }
+
+      if (!frame.AssignValue(inst, lldb_private::Scalar(pointer_value),
+                             module)) {
+        LLDB_LOGF(log, "Couldn't assign the result of an AddrSpaceCastInst");
+        error = lldb_private::Status::FromErrorString(memory_write_error);
+        return false;
+      }
     } break;
     case Instruction::SExt: {
       const CastInst *cast_inst = cast<CastInst>(inst);

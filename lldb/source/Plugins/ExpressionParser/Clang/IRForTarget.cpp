@@ -44,16 +44,20 @@
 
 using namespace llvm;
 using lldb_private::LLDBLog;
+using lldb_private::ir_for_target_detail::FunctionValueCache;
+using lldb_private::ir_for_target_detail::UnfoldConstant;
 
 typedef SmallVector<Instruction *, 2> InstrList;
 
-IRForTarget::FunctionValueCache::FunctionValueCache(Maker const &maker)
+lldb_private::ir_for_target_detail::FunctionValueCache::FunctionValueCache(
+    const Maker &maker)
     : m_maker(maker), m_values() {}
 
-IRForTarget::FunctionValueCache::~FunctionValueCache() = default;
+lldb_private::ir_for_target_detail::FunctionValueCache::~FunctionValueCache() =
+    default;
 
-llvm::Value *
-IRForTarget::FunctionValueCache::GetValue(llvm::Function *function) {
+llvm::Value *lldb_private::ir_for_target_detail::FunctionValueCache::GetValue(
+    llvm::Function *function) {
   if (!m_values.count(function)) {
     llvm::Value *ret = m_maker(function);
     m_values[function] = ret;
@@ -982,6 +986,7 @@ bool IRForTarget::MaybeHandleVariable(Value *llvm_value_ptr) {
     switch (constant_expr->getOpcode()) {
     default:
       break;
+    case Instruction::AddrSpaceCast:
     case Instruction::GetElementPtr:
     case Instruction::BitCast:
       Value *s = constant_expr->getOperand(0);
@@ -1308,11 +1313,11 @@ bool IRForTarget::RemoveGuards(BasicBlock &basic_block) {
 }
 
 // This function does not report errors; its callers are responsible.
-bool IRForTarget::UnfoldConstant(Constant *old_constant,
-                                 llvm::Function *llvm_function,
-                                 FunctionValueCache &value_maker,
-                                 FunctionValueCache &entry_instruction_finder,
-                                 lldb_private::Stream &error_stream) {
+static bool UnfoldConstantImpl(Constant *old_constant,
+                               llvm::Function *llvm_function,
+                               FunctionValueCache &value_maker,
+                               FunctionValueCache &entry_instruction_finder,
+                               lldb_private::Stream &error_stream) {
   SmallVector<User *, 16> users;
 
   // We do this because the use list might change, invalidating our iterator.
@@ -1351,8 +1356,39 @@ bool IRForTarget::UnfoldConstant(Constant *old_constant,
                         ->getIterator());
               });
 
-          if (!UnfoldConstant(constant_expr, llvm_function, bit_cast_maker,
-                              entry_instruction_finder, error_stream))
+          if (!UnfoldConstantImpl(constant_expr, llvm_function, bit_cast_maker,
+                                  entry_instruction_finder, error_stream))
+            return false;
+        } break;
+        case Instruction::AddrSpaceCast: {
+          FunctionValueCache addr_space_cast_maker(
+              [&value_maker, &entry_instruction_finder, old_constant,
+               constant_expr](llvm::Function *function) -> llvm::Value * {
+                // UnaryExpr
+                //   OperandList[0] is value
+
+                if (constant_expr->getOperand(0) != old_constant)
+                  return constant_expr;
+
+                llvm::Value *replacement = value_maker.GetValue(function);
+                llvm::Type *destination_type = constant_expr->getType();
+
+                // The replacement may already have the destination address
+                // space. For example, an AMDGPU AS1 global is replaced with
+                // an AS0 pointer into LLDB's materialization structure.
+                if (replacement->getType() == destination_type)
+                  return replacement;
+
+                return CastInst::CreatePointerBitCastOrAddrSpaceCast(
+                    replacement, destination_type, "",
+                    llvm::cast<Instruction>(
+                        entry_instruction_finder.GetValue(function))
+                        ->getIterator());
+              });
+
+          if (!UnfoldConstantImpl(constant_expr, llvm_function,
+                                  addr_space_cast_maker,
+                                  entry_instruction_finder, error_stream))
             return false;
         } break;
         case Instruction::GetElementPtr: {
@@ -1386,9 +1422,9 @@ bool IRForTarget::UnfoldConstant(Constant *old_constant,
                         ->getIterator());
               });
 
-          if (!UnfoldConstant(constant_expr, llvm_function,
-                              get_element_pointer_maker,
-                              entry_instruction_finder, error_stream))
+          if (!UnfoldConstantImpl(constant_expr, llvm_function,
+                                  get_element_pointer_maker,
+                                  entry_instruction_finder, error_stream))
             return false;
         } break;
         }
@@ -1421,6 +1457,15 @@ bool IRForTarget::UnfoldConstant(Constant *old_constant,
   }
 
   return true;
+}
+
+bool lldb_private::ir_for_target_detail::UnfoldConstant(
+    llvm::Constant *old_constant, llvm::Function *llvm_function,
+    FunctionValueCache &value_maker,
+    FunctionValueCache &entry_instruction_finder,
+    lldb_private::Stream &error_stream) {
+  return UnfoldConstantImpl(old_constant, llvm_function, value_maker,
+                            entry_instruction_finder, error_stream);
 }
 
 bool IRForTarget::ReplaceVariables(Function &llvm_function) {

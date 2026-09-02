@@ -10,6 +10,8 @@
 #ifndef LLDB_SOURCE_PLUGINS_EXPRESSIONPARSER_CLANG_IRFORTARGET_H
 #define LLDB_SOURCE_PLUGINS_EXPRESSIONPARSER_CLANG_IRFORTARGET_H
 
+#include "IRForTargetInternal.h"
+
 #include "lldb/Symbol/TaggedASTType.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/Status.h"
@@ -18,9 +20,6 @@
 #include "lldb/lldb-public.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/Pass.h"
-
-#include <functional>
-#include <map>
 
 namespace llvm {
 class BasicBlock;
@@ -352,41 +351,8 @@ private:
   /// ASTResultSynthesizer::SynthesizeBodyResult)
   bool m_result_is_pointer = false;
 
-  class FunctionValueCache {
-  public:
-    typedef std::function<llvm::Value *(llvm::Function *)> Maker;
-
-    FunctionValueCache(Maker const &maker);
-    ~FunctionValueCache();
-    llvm::Value *GetValue(llvm::Function *function);
-
-  private:
-    Maker const m_maker;
-    typedef std::map<llvm::Function *, llvm::Value *> FunctionValueMap;
-    FunctionValueMap m_values;
-  };
-
-  FunctionValueCache m_entry_instruction_finder;
-
-  /// UnfoldConstant operates on a constant [Old] which has just been replaced
-  /// with a value [New].  We assume that new_value has been properly placed
-  /// early in the function, in front of the first instruction in the entry
-  /// basic block [FirstEntryInstruction].
-  ///
-  /// UnfoldConstant reads through the uses of Old and replaces Old in those
-  /// uses with New.  Where those uses are constants, the function generates
-  /// new instructions to compute the result of the new, non-constant
-  /// expression and places them before FirstEntryInstruction.  These
-  /// instructions replace the constant uses, so UnfoldConstant calls itself
-  /// recursively for those.
-  ///
-  /// \return
-  ///     True on success; false otherwise
-  static bool UnfoldConstant(llvm::Constant *old_constant,
-                             llvm::Function *llvm_function,
-                             FunctionValueCache &value_maker,
-                             FunctionValueCache &entry_instruction_finder,
-                             lldb_private::Stream &error_stream);
+  lldb_private::ir_for_target_detail::FunctionValueCache
+      m_entry_instruction_finder;
 };
 
 #endif // LLDB_SOURCE_PLUGINS_EXPRESSIONPARSER_CLANG_IRFORTARGET_H

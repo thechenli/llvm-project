@@ -506,6 +506,13 @@ public:
     } else {
       lldb::addr_t addr_of_valobj =
           valobj_sp->GetAddressOf(/*scalar_is_load_address=*/false).address;
+
+      // IRMemoryMap addresses do not carry a target address-space ID. If the
+      // variable's storage has an explicit address-space ID, materialize a
+      // copy so the interpreter does not later try to access that storage as
+      // a plain load address.
+      if (valobj_sp->GetValue().GetAddressSpaceId())
+        addr_of_valobj = LLDB_INVALID_ADDRESS;
       if (addr_of_valobj != LLDB_INVALID_ADDRESS) {
         Status write_error;
         map.WritePointerToMemory(load_addr, addr_of_valobj, write_error);
@@ -662,13 +669,28 @@ public:
       Status set_error;
 
       if (actually_write) {
-        valobj_sp->SetData(data, set_error);
-
-        if (!set_error.Success()) {
+        Status valobj_error = valobj_sp->GetError().Clone();
+        if (valobj_error.Fail()) {
           err = Status::FromErrorStringWithFormat(
-              "couldn't write the new contents of %s back into the variable",
-              GetName().AsCString());
+              "couldn't get the value of variable %s: %s",
+              GetName().AsCString(), valobj_error.AsCString());
           return;
+        }
+
+        if (valobj_sp->GetValue().GetAddressSpaceId()) {
+          err = Status::FromErrorStringWithFormat(
+              "can't write the new contents of %s back to address-space-"
+              "qualified storage",
+              GetName().AsCString());
+        } else {
+          valobj_sp->SetData(data, set_error);
+
+          if (!set_error.Success()) {
+            err = Status::FromErrorStringWithFormat(
+                "couldn't write the new contents of %s back into the variable",
+                GetName().AsCString());
+            return;
+          }
         }
       }
 

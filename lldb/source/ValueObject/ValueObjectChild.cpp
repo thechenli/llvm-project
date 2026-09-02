@@ -117,7 +117,9 @@ bool ValueObjectChild::UpdateValue() {
           ((m_is_base_class) &&
            (parent_type_flags.AnySet(lldb::eTypeInstanceIsPointer)));
 
-      if (parent->GetCompilerType().ShouldTreatScalarValueAsAddress()) {
+      const bool parent_scalar_is_address =
+          parent_type.ShouldTreatScalarValueAsAddress();
+      if (parent_scalar_is_address) {
         m_value.GetScalar() = parent->GetPointerValue().address;
 
         switch (parent->GetAddressTypeOfChildren()) {
@@ -149,7 +151,13 @@ bool ValueObjectChild::UpdateValue() {
       case Value::ValueType::FileAddress:
       case Value::ValueType::HostAddress: {
         lldb::addr_t addr = m_value.GetScalar().ULongLong(LLDB_INVALID_ADDRESS);
-        std::optional<uint64_t> address_space = parent->GetValue().GetAddressSpaceId();
+        // An address space attached to the parent describes the storage that
+        // contains the parent. It still applies to an offset within that
+        // storage, but not after the scalar has been replaced with a pointer
+        // or reference value naming different storage.
+        std::optional<uint64_t> address_space =
+            parent_scalar_is_address ? std::nullopt
+                                     : parent->GetValue().GetAddressSpaceId();
         if (addr == LLDB_INVALID_ADDRESS) {
           m_error = Status::FromErrorString("parent address is invalid.");
         } else if (addr == 0 && !address_space) {

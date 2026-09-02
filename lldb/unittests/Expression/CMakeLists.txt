@@ -10,9 +10,13 @@ add_lldb_unittest(ExpressionTests
   DWARFExpressionTest.cpp
   CppModuleConfigurationTest.cpp
   ExpressionTest.cpp
+  IRForTargetTest.cpp
+  IRInterpreterTest.cpp
+  MaterializerTest.cpp
   ValueMatcher.cpp
 
   LINK_COMPONENTS
+    AsmParser
     Support
     ${LINK_COMPONENTS_AARCH}
   LINK_LIBS
@@ -22,6 +26,7 @@ add_lldb_unittest(ExpressionTests
     lldbPluginSymbolVendorWasm
     lldbPluginPlatformLinux
     lldbPluginExpressionParserClang
+    lldbPluginScriptInterpreterNone
     lldbPluginTypeSystemClang
     lldbUtility
     lldbUtilityHelpers
